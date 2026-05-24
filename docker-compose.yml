@@ -1,0 +1,15 @@
+services:
+  cv-tracking:
+    build: .
+    container_name: cv-tracking
+
+    ports:
+      - "8888:8888"
+
+    volumes:
+      - ./:/app
+
+    working_dir: /app
+
+    tty: true
+    stdin_open: true
