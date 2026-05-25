@@ -1,233 +1,318 @@
 import cv2
 import numpy as np
-import os
 
 # =====================================
 # CONFIG
 # =====================================
-VIDEO_PATH = "videos/move_object_motor.mp4"
-VIDEO_OUTPUT_PATH = "output/move_object_motor_optical_flow.mp4"
 
-MIN_POINTS = 5          # Re-detect if tracked points fall below this
-TRAIL_LENGTH = 30       # How many frames of trail history to keep
-TRAIL_FADE = True       # Whether to fade older trail segments
+VIDEO_PATH  = "videos/parfum_geser.mp4"
+OUTPUT_PATH = "output/manual_lucas_kanade_parfum_geser.mp4"
 
-os.makedirs("output", exist_ok=True)
-
+WINDOW_SIZE    = 10
+MAX_ITERATIONS = 20
+EPS            = 0.01
+MAX_FLOW       = 30
+MIN_FEATURES   = 8
+REDETECT_EVERY = 20
+PYRAMID_LEVELS = 3
 
 # =====================================
-# FUNCTION: OPTICAL FLOW MANUAL (LK)
+# MANUAL LK - SINGLE POINT, ITERATIVE
 # =====================================
-def optical_flow_manual(im1, im2, points, window_size=7):
+
+def build_pyramid(img, levels):
+    pyr = [img.astype(np.float64)]
+    for _ in range(levels - 1):
+        blurred    = cv2.GaussianBlur(pyr[-1], (5, 5), 1.0)
+        downsampled = blurred[::2, ::2]
+        pyr.append(downsampled)
+    return pyr
+
+def manual_lk_point(prev_pyr, curr_pyr, px, py, levels, win):
+    total_dx = 0.0
+    total_dy = 0.0
+
+    for level in range(levels - 1, -1, -1):
+        scale  = 2 ** level
+        prev_l = prev_pyr[level]
+        curr_l = curr_pyr[level]
+        h_l, w_l = prev_l.shape
+
+        lpx = px / scale
+        lpy = py / scale
+        dx  = total_dx / scale
+        dy  = total_dy / scale
+
+        for _ in range(MAX_ITERATIONS):
+            p0x = int(round(lpx))
+            p0y = int(round(lpy))
+            cx  = lpx + dx
+            cy  = lpy + dy
+            cxi = int(cx)
+            cyi = int(cy)
+
+            if (p0x < win or p0y < win or
+                p0x >= w_l - win or p0y >= h_l - win):
+                break
+            if (cxi < win or cyi < win or
+                cxi >= w_l - win - 1 or cyi >= h_l - win - 1):
+                break
+
+            prev_patch = prev_l[p0y-win:p0y+win+1, p0x-win:p0x+win+1]
+            curr_patch = curr_l[cyi-win:cyi+win+1, cxi-win:cxi+win+1]
+
+            if prev_patch.shape != curr_patch.shape:
+                break
+
+            Ix  = cv2.Sobel(prev_patch, cv2.CV_64F, 1, 0, ksize=3)
+            Iy  = cv2.Sobel(prev_patch, cv2.CV_64F, 0, 1, ksize=3)
+            It  = curr_patch - prev_patch
+
+            Ixx = np.sum(Ix * Ix)
+            Ixy = np.sum(Ix * Iy)
+            Iyy = np.sum(Iy * Iy)
+            det = Ixx * Iyy - Ixy ** 2
+
+            if abs(det) < 1e-5:
+                break
+
+            ATb   = np.array([-np.sum(Ix * It), -np.sum(Iy * It)])
+            ATA   = np.array([[Ixx, Ixy], [Ixy, Iyy]])
+            delta = np.linalg.inv(ATA) @ ATb
+
+            dx += delta[0]
+            dy += delta[1]
+
+            if np.hypot(delta[0], delta[1]) < EPS:
+                break
+
+        total_dx = dx * scale
+        total_dy = dy * scale
+
+    return total_dx, total_dy
+
+# =====================================
+# FORWARD-BACKWARD ERROR CHECK
+# =====================================
+
+def fb_error(prev_pyr, curr_pyr, px, py, dx, dy, levels, win):
     """
-    Menghitung Optical Flow secara manual menggunakan metode Lucas-Kanade.
+    Track forward px,py → new point, then track backward.
+    Return the distance between original and back-tracked point.
+    Small error = reliable track.
     """
-    half_w = window_size // 2
+    new_px = px + dx
+    new_py = py + dy
 
-    im1_blur = cv2.GaussianBlur(im1, (5, 5), 1.0)
-    im2_blur = cv2.GaussianBlur(im2, (5, 5), 1.0)
+    bdx, bdy = manual_lk_point(curr_pyr, prev_pyr, new_px, new_py, levels, win)
 
-    Ix = cv2.Sobel(im1_blur, cv2.CV_64F, 1, 0, ksize=3)
-    Iy = cv2.Sobel(im1_blur, cv2.CV_64F, 0, 1, ksize=3)
-    It = im2_blur.astype(np.float64) - im1_blur.astype(np.float64)
+    back_px = new_px + bdx
+    back_py = new_py + bdy
 
-    good_new_points = []
-    status = []
+    return np.hypot(back_px - px, back_py - py)
 
-    # FIX: normalise shape → always (N, 2)
-    pts = points.reshape(-1, 2)
-
-    for pt in pts:
-        x_f, y_f = float(pt[0]), float(pt[1])
-        x, y = int(round(x_f)), int(round(y_f))
-
-        if (y - half_w < 0 or y + half_w >= im1.shape[0] or
-                x - half_w < 0 or x + half_w >= im1.shape[1]):
-            status.append(0)
-            good_new_points.append([x_f, y_f])
-            continue
-
-        A_x = Ix[y - half_w: y + half_w + 1, x - half_w: x + half_w + 1].flatten()
-        A_y = Iy[y - half_w: y + half_w + 1, x - half_w: x + half_w + 1].flatten()
-        B   = -It[y - half_w: y + half_w + 1, x - half_w: x + half_w + 1].flatten()
-
-        A = np.vstack((A_x, A_y)).T
-        ATA = A.T @ A
-
-        if abs(np.linalg.det(ATA)) < 1e-5:
-            status.append(0)
-            good_new_points.append([x_f, y_f])
-        else:
-            ATB = A.T @ B
-            try:
-                u, v = np.linalg.solve(ATA, ATB)
-            except np.linalg.LinAlgError:
-                status.append(0)
-                good_new_points.append([x_f, y_f])
-                continue
-
-            if np.sqrt(u ** 2 + v ** 2) > 20:
-                status.append(0)
-                good_new_points.append([x_f, y_f])
-            else:
-                status.append(1)
-                good_new_points.append([x_f + u, y_f + v])
-
-    # Return shape (N, 1, 2) to stay consistent with OpenCV convention
-    return (np.array(good_new_points, dtype=np.float32).reshape(-1, 1, 2),
-            np.array(status, dtype=np.uint8))
-
+FB_THRESHOLD = 2.0   # pixels — tracks with higher error are rejected
 
 # =====================================
-# HELPER: Re-detect feature points inside bbox
+# FEATURE DETECTION — CENTER-WEIGHTED
 # =====================================
-def redetect_points(gray, x, y, w, h):
-    mask_roi = np.zeros_like(gray)
-    x1 = max(0, x)
-    y1 = max(0, y)
-    x2 = min(gray.shape[1], x + w)
-    y2 = min(gray.shape[0], y + h)
-    mask_roi[y1:y2, x1:x2] = 255
-    pts = cv2.goodFeaturesToTrack(gray, mask=mask_roi,
-                                  maxCorners=50, qualityLevel=0.3, minDistance=7)
+
+def detect_features(gray, bx, by, bw, bh):
+    """
+    Detect features but DOWN-WEIGHT the border region of the box
+    so we pick object features, not background edge features.
+    """
+    bx, by = int(bx), int(by)
+
+    # Shrink the detection zone to the inner 70% of the box
+    shrink_x = int(bw * 0.15)
+    shrink_y = int(bh * 0.15)
+
+    ix = bx + shrink_x
+    iy = by + shrink_y
+    iw = bw - 2 * shrink_x
+    ih = bh - 2 * shrink_y
+
+    # Guard against tiny box
+    if iw < 10 or ih < 10:
+        ix, iy, iw, ih = bx, by, bw, bh
+
+    roi = gray[iy:iy+ih, ix:ix+iw]
+
+    corners = cv2.goodFeaturesToTrack(
+        roi,
+        maxCorners=80,
+        qualityLevel=0.02,    # slightly stricter quality
+        minDistance=7,
+        blockSize=7
+    )
+
+    if corners is None:
+        return []
+
+    pts = []
+    for c in corners:
+        fx, fy = c.ravel()
+        pts.append([float(fx + ix), float(fy + iy)])
+
     return pts
 
+# =====================================
+# OPEN VIDEO
+# =====================================
 
-# =====================================
-# OPEN VIDEO & SELECT ROI
-# =====================================
 cap = cv2.VideoCapture(VIDEO_PATH)
 if not cap.isOpened():
-    raise IOError(f"Tidak bisa membuka video: {VIDEO_PATH}")
+    raise Exception("Cannot open video")
 
 ret, first_frame = cap.read()
 if not ret:
-    raise IOError("Tidak bisa membaca frame pertama dari video!")
+    raise Exception("Cannot read first frame")
 
-FRAME_HEIGHT, FRAME_WIDTH = first_frame.shape[:2]
+# =====================================
+# SELECT ROI
+# =====================================
 
-print("Select ROI and press ENTER or SPACE. Press C to cancel.")
-bbox = cv2.selectROI("Select Object", first_frame, fromCenter=False, showCrosshair=True)
+print("Select ROI and press ENTER")
+bbox = cv2.selectROI("Select ROI", first_frame, fromCenter=False, showCrosshair=True)
 cv2.destroyAllWindows()
+
 x, y, w, h = bbox
+box_x, box_y = float(x), float(y)
 
-if w == 0 or h == 0:
-    raise ValueError("ROI tidak valid (lebar atau tinggi = 0).")
+# =====================================
+# INIT
+# =====================================
 
-old_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
-p0 = redetect_points(old_gray, x, y, w, h)
+prev_gray      = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
+frame_h, frame_w = prev_gray.shape
+prev_pyr       = build_pyramid(prev_gray, PYRAMID_LEVELS)
+feature_points = detect_features(prev_gray, box_x, box_y, w, h)
 
-if p0 is None or len(p0) == 0:
-    raise Exception("Tidak ada titik fitur terdeteksi di ROI!")
-
-centroid_trail = []
+if not feature_points:
+    raise Exception("No features found in ROI")
 
 # =====================================
 # VIDEO WRITER
 # =====================================
-fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+fps    = cap.get(cv2.CAP_PROP_FPS) or 30
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-out = cv2.VideoWriter(VIDEO_OUTPUT_PATH, fourcc, fps, (FRAME_WIDTH, FRAME_HEIGHT))
-
-frame_count = 0
+out    = cv2.VideoWriter(OUTPUT_PATH, fourcc, fps, (frame_w, frame_h))
+if not out.isOpened():
+    raise Exception("VideoWriter failed")
 
 # =====================================
-# LOOP TRACKING
+# TRACKING LOOP
 # =====================================
+
+frame_count           = 0
+frames_since_redetect = 0
+
 while True:
+
     ret, frame = cap.read()
     if not ret:
         break
 
-    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray     = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    curr_pyr = build_pyramid(gray, PYRAMID_LEVELS)
+    output   = frame.copy()
 
-    p1, st = optical_flow_manual(old_gray, frame_gray, p0, window_size=7)
+    new_points = []
+    dx_list    = []
+    dy_list    = []
 
-    # ─────────────────────────────────────────────────────────────────────
-    # FIX: p1 shape is (N,1,2); boolean index gives (K,1,2) not (K,2).
-    #      Reshape to (K,2) immediately so [:, 0] and [:, 1] always work.
-    # ─────────────────────────────────────────────────────────────────────
-    good_new = p1[st == 1].reshape(-1, 2)
-    good_old = p0.reshape(-1, 2)[st == 1]
+    # =================================
+    # TRACK + FORWARD-BACKWARD CHECK
+    # =================================
 
-    # --- Re-detect jika poin terlalu sedikit ---
-    if len(good_new) < MIN_POINTS:
-        print(f"Frame {frame_count}: poin tersisa {len(good_new)}, re-deteksi...")
-        p0_redet = redetect_points(frame_gray, x, y, w, h)
-        if p0_redet is not None and len(p0_redet) >= MIN_POINTS:
-            p0 = p0_redet
-            old_gray = frame_gray.copy()
-            frame_count += 1
+    for px, py in feature_points:
+
+        dx, dy = manual_lk_point(
+            prev_pyr, curr_pyr, px, py, PYRAMID_LEVELS, WINDOW_SIZE
+        )
+
+        # 1. Magnitude outlier rejection
+        if abs(dx) > MAX_FLOW or abs(dy) > MAX_FLOW:
             continue
-        else:
-            print("Re-deteksi gagal, menghentikan tracking.")
-            break
 
-    # --- Update bounding box dinamis ---
-    # good_new is now safely (K, 2) → [:, 0] and [:, 1] are valid
-    x_coords = good_new[:, 0]
-    y_coords = good_new[:, 1]
-    x_min, x_max = int(np.min(x_coords)), int(np.max(x_coords))
-    y_min, y_max = int(np.min(y_coords)), int(np.max(y_coords))
+        # 2. Forward-backward consistency check
+        err = fb_error(prev_pyr, curr_pyr, px, py, dx, dy, PYRAMID_LEVELS, WINDOW_SIZE)
+        if err > FB_THRESHOLD:
+            continue          # unreliable track — discard
 
-    padding = 15
-    x = max(0, x_min - padding)
-    y = max(0, y_min - padding)
-    w = min(FRAME_WIDTH,  x_max + padding) - x
-    h = min(FRAME_HEIGHT, y_max + padding) - y
+        new_x = px + dx
+        new_y = py + dy
 
-    # --- Centroid ---
-    cx = int(np.mean(x_coords))
-    cy = int(np.mean(y_coords))
-    centroid_trail.append((cx, cy))
-    if len(centroid_trail) > TRAIL_LENGTH:
-        centroid_trail.pop(0)
+        if (WINDOW_SIZE < new_x < frame_w - WINDOW_SIZE and
+                WINDOW_SIZE < new_y < frame_h - WINDOW_SIZE):
 
-    # =====================================
-    # GAMBAR TRAIL (motion history lines)
-    # =====================================
-    n = len(centroid_trail)
-    for i in range(1, n):
-        alpha = i / n                           # 0.0 (tertua) → 1.0 (terbaru)
-        thickness = max(1, int(3 * alpha))
-        if TRAIL_FADE:
-            color = (0, int(255 * (1 - alpha)), 255)  # kuning → merah
-            overlay = frame.copy()
-            cv2.line(overlay, centroid_trail[i - 1], centroid_trail[i], color, thickness)
-            cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
-        else:
-            cv2.line(frame, centroid_trail[i - 1], centroid_trail[i], (0, 200, 255), 2)
+            new_points.append([new_x, new_y])
+            dx_list.append(dx)
+            dy_list.append(dy)
 
-    # --- Titik pelacak merah ---
-    for new_pt in good_new:
-        a, b = int(new_pt[0]), int(new_pt[1])
-        cv2.circle(frame, (a, b), 4, (0, 0, 255), -1)
+            cv2.arrowedLine(output,
+                            (int(px), int(py)), (int(new_x), int(new_y)),
+                            (0, 255, 0), 2, tipLength=0.4)
+            cv2.circle(output, (int(new_x), int(new_y)), 3, (0, 0, 255), -1)
 
-    # --- Bounding box hijau ---
-    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+    # =================================
+    # ROBUST BOX UPDATE
+    # =================================
 
-    # --- Centroid biru ---
-    cv2.circle(frame, (cx, cy), 6, (255, 100, 0), -1)
+    if len(dx_list) >= 2:
+        avg_dx = np.median(dx_list)
+        avg_dy = np.median(dy_list)
+        box_x += avg_dx
+        box_y += avg_dy
 
-    # --- Info teks ---
-    cv2.putText(frame, f"Tracked Points : {len(good_new)}", (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
-    cv2.putText(frame, f"Frame          : {frame_count}", (20, 65),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+    box_x = float(np.clip(box_x, 0, frame_w - w))
+    box_y = float(np.clip(box_y, 0, frame_h - h))
+    bxi, byi = int(box_x), int(box_y)
 
-    cv2.imshow("Manual Optical Flow Tracking", frame)
-    out.write(frame)
+    # =================================
+    # CARRY POINTS FORWARD
+    # =================================
 
-    # --- Persiapan frame berikutnya ---
-    old_gray = frame_gray.copy()
-    p0 = good_new.reshape(-1, 1, 2)   # store back as (N,1,2) for next iteration
+    feature_points        = new_points
+    frames_since_redetect += 1
+
+    if (len(feature_points) < MIN_FEATURES or
+            frames_since_redetect >= REDETECT_EVERY):
+        feature_points        = detect_features(gray, box_x, box_y, w, h)
+        frames_since_redetect = 0
+
+    # =================================
+    # DRAW
+    # =================================
+
+    cv2.rectangle(output, (bxi, byi), (bxi + w, byi + h), (255, 0, 0), 3)
+
+    cv2.putText(output, "Manual Lucas-Kanade Tracking",
+                (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(output, f"Tracked Features: {len(feature_points)}",
+                (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(output, f"FB-Validated: {len(dx_list)}",
+                (20, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 200, 255), 2)
+
+    cv2.imshow("Manual Lucas-Kanade Tracking", output)
+    out.write(output)
+
+    prev_pyr  = curr_pyr
+    prev_gray = gray.copy()
     frame_count += 1
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        print("Dihentikan oleh pengguna.")
+    if cv2.waitKey(30) & 0xFF == ord('q'):
         break
+
+# =====================================
+# RELEASE
+# =====================================
 
 cap.release()
 out.release()
 cv2.destroyAllWindows()
-print(f"Selesai! Output disimpan di: {VIDEO_OUTPUT_PATH}")
+
+print(f"\nProcessed {frame_count} frames")
+print(f"Saved to: {OUTPUT_PATH}")
