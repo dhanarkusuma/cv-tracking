@@ -1,4 +1,5 @@
 import cv2
+import numpy as np
 
 # =====================================
 # CONFIG
@@ -16,6 +17,10 @@ if not cap.isOpened():
     raise Exception("Cannot open video")
 
 ret, first_frame = cap.read()
+# first_frame = cv2.resize(
+#     first_frame,
+#     (640, 360)
+# )
 
 if not ret:
     raise Exception("Cannot read first frame")
@@ -42,6 +47,7 @@ print(f"x = {x}")
 print(f"y = {y}")
 print(f"w = {w}")
 print(f"h = {h}")
+print("\nTemplate Captured.")
 
 # =====================================
 # CREATE TEMPLATE
@@ -65,6 +71,8 @@ if fps == 0:
 
 frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+# frame_width = 640
+# frame_height = 360
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
@@ -84,49 +92,64 @@ if not out.isOpened():
 
 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-# =====================================
-# TRACKING LOOP
-# =====================================
-
 frame_count = 0
 
 while True:
-    ret, frame = cap.read()
 
+    ret, frame = cap.read()
     if not ret:
         break
 
-    # ================================
-    # FRAME TO GRAYSCALE
-    # ================================
-
+    # frame = cv2.resize(
+    #     frame,
+    #     (640, 360)
+    # )
     gray_frame = cv2.cvtColor(
         frame,
         cv2.COLOR_BGR2GRAY
     )
 
-    # ================================
-    # TEMPLATE MATCHING
-    # ================================
+    min_ssd = float("inf")
 
-    result = cv2.matchTemplate(
-        gray_frame,
-        gray_template,
-        cv2.TM_CCOEFF_NORMED
-    )
+    best_x = 0
+    best_y = 0
 
-    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+    # =================================
+    # SLIDING WINDOW
+    # =================================
 
-    top_left = max_loc
+    for j in range(0, gray_frame.shape[0] - h, 20):
+        for i in range(0, gray_frame.shape[1] - w, 20):
+            window = gray_frame[
+                j:j+h,
+                i:i+w
+            ]
+
+            # =========================
+            # SSD CALCULATION
+            # =========================
+
+            ssd = np.sum(( window.astype(np.float32) - gray_template.astype(np.float32)) ** 2)
+
+            # =========================
+            # FIND BEST MATCH
+            # =========================
+
+            if ssd < min_ssd:
+                min_ssd = ssd
+                best_x = i
+                best_y = j
+
+    # =================================
+    # DRAW RECTANGLE
+    # =================================
+
+    top_left = (best_x, best_y)
 
     bottom_right = (
-        top_left[0] + w,
-        top_left[1] + h
+        best_x + w,
+        best_y + h
     )
-
-    # ================================
-    # DRAW RECTANGLE
-    # ================================
 
     cv2.rectangle(
         frame,
@@ -136,37 +159,33 @@ while True:
         3
     )
 
-    # ================================
-    # CONFIDENCE TEXT
-    # ================================
+    # =================================
+    # TEXT
+    # =================================
 
     cv2.putText(
         frame,
-        f"Confidence: {max_val:.2f}",
+        "Manual Template Matching",
         (20, 50),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1,
-        (0, 255, 0),
-        2
-    )
-
-    # ================================
-    # METHOD LABEL
-    # ================================
-
-    cv2.putText(
-        frame,
-        "Template Matching",
-        (20, 100),
         cv2.FONT_HERSHEY_SIMPLEX,
         1,
         (255, 0, 0),
         2
     )
 
-    # ================================
-    # SAVE FRAME
-    # ================================
+    cv2.putText(
+        frame,
+        f"SSD: {min_ssd:.0f}",
+        (20, 100),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (0, 255, 0),
+        2
+    )
+
+    # =================================
+    # SAVE
+    # =================================
 
     out.write(frame)
 
@@ -184,4 +203,4 @@ cap.release()
 out.release()
 cv2.destroyAllWindows()
 
-print(f"\nFinished processing {frame_count} frames")
+print(f"\nProcessed {frame_count} frames")
