@@ -5,8 +5,8 @@ import numpy as np
 # CONFIG
 # =====================================
 
-VIDEO_PATH  = "videos/parfum_geser.mp4"
-OUTPUT_PATH = "output/manual_lucas_kanade_parfum_geser.mp4"
+VIDEO_PATH  = "videos/static_object.mp4"
+OUTPUT_PATH = "output/manual_lucas_kanade_static_object.mp4"
 
 WINDOW_SIZE    = 10
 MAX_ITERATIONS = 20

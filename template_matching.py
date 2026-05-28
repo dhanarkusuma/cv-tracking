@@ -5,8 +5,8 @@ import numpy as np
 # CONFIG
 # =====================================
 
-VIDEO_PATH = "videos/parfum_geser.mp4"
-VIDEO_OUTPUT_PATH = "output/parfum_geser_manual.mp4"
+VIDEO_PATH = "videos/static_object.mp4"
+VIDEO_OUTPUT_PATH = "output/static_object_manual.mp4"
 
 # =====================================
 # OPEN VIDEO
